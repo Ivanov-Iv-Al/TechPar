@@ -64,11 +64,14 @@ int main() {
     cout << "Всего итераций: " << iterations << endl;
     cout << endl;
 
-    const int MAX_THREADS = 12;
+    const int MAX_THREADS = 8;
     const int N_BIG = 100000000;
 
-    cout << "Анализ масштабируемости (N = " << N_BIG << ")" << endl;
-    cout << "    Потоки      Время, с      Ускорение     Эффект., %" << endl;
+    cout << "Scalability analysis (N = " << N_BIG << ")" << endl;
+    cout << setw(8)  << "Threads"
+         << setw(15) << "Time, s"
+         << setw(15) << "Speedup"
+         << setw(15) << "Efficiency, %" << endl;
 
     double t1 = 0.0;
 
@@ -76,7 +79,7 @@ int main() {
         omp_set_num_threads(p);
 
         double t_start = omp_get_wtime();
-        double I_big = simpson_integration(a, b, N_BIG);
+        volatile double I_big = simpson_integration(a, b, N_BIG);
         double t_end = omp_get_wtime();
 
         double t = t_end - t_start;
