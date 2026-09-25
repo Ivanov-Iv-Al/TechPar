@@ -1,13 +1,15 @@
 import subprocess
 import os
-import time
 import matplotlib.pyplot as plt
 import numpy as np
 
 CPP_CODE = r'''
 #include <iostream>
 #include <cmath>
+#include <iomanip>
 #include <omp.h>
+
+using namespace std;
 
 double func(double x) {
     return sqrt(x * (3.0 - x)) / (x + 1.0);
@@ -19,7 +21,7 @@ double simpson_integration(double a, double b, int n) {
     #pragma omp parallel for reduction(+:sum_odd, sum_even)
     for (int i = 1; i < n; i++) {
         double x = a + i * h;
-        if (i % 2 == 1) sum_odd += func(x);
+        if (i % 2 == 1) sum_odd  += func(x);
         else            sum_even += func(x);
     }
     return (h / 3.0) * (func(a) + 4.0 * sum_odd + 2.0 * sum_even + func(b));
@@ -36,11 +38,16 @@ int main() {
         n *= 2;
     } while (error > eps);
 
-    volatile double sink = 0.0;
-    for (int k = 0; k < 200; k++) {
-        sink += simpson_integration(a, b, 2000000);
+    const int MAX_THREADS = 8;
+    const int N_BIG = 100000000;
+
+    for (int p = 1; p <= MAX_THREADS; p++) {
+        omp_set_num_threads(p);
+        double t_start = omp_get_wtime();
+        volatile double I_big = simpson_integration(a, b, N_BIG);
+        double t_end = omp_get_wtime();
+        cout << "RESULT " << p << " " << (t_end - t_start) << endl;
     }
-    std::cout << I_curr << std::endl;
     return 0;
 }
 '''
@@ -48,83 +55,90 @@ int main() {
 def compile_cpp():
     with open("simpson.cpp", "w") as f:
         f.write(CPP_CODE)
-    result = subprocess.run(
-        ["g++", "-O2", "-fopenmp", "simpson.cpp", "-o", "simpson"],
-        capture_output=True, text=True
-    )
-    return result.returncode == 0
+    r = subprocess.run(["g++", "-O2", "-fopenmp", "simpson.cpp", "-o", "simpson"],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        print("STDERR:", r.stderr)
+        return False
+    return True
 
-def measure_real(threads_list, repeats=3):
-    times = []
-    for t in threads_list:
-        env = os.environ.copy()
-        env["OMP_NUM_THREADS"] = str(t)
-        best = float("inf")
-        for _ in range(repeats):
-            start = time.perf_counter()
-            subprocess.run(["./simpson"], env=env,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            elapsed = time.perf_counter() - start
-            best = min(best, elapsed)
-        times.append(best)
-        print(f"Потоков: {t:3d} -> время: {best:.4f} с")
-    return times
+def run_and_parse():
+    out = subprocess.run(["./simpson"], capture_output=True, text=True).stdout
+    threads, times = [], []
+    for line in out.strip().splitlines():
+        parts = line.split()
+        if len(parts) == 3 and parts[0] == "RESULT":
+            threads.append(int(parts[1]))
+            times.append(float(parts[2]))
+    return threads, times
 
-def measure_model(threads_list):
-    T1 = 5.0
-    S = 0.02
-    overhead = 0.015
-    return [T1 * (S + (1 - S) / p) + overhead * p for p in threads_list]
+def simulate(threads):
+    T1 = 6.0
+    S = 0.05
+    overhead = 0.05
+    return [T1 * (S + (1 - S) / p) + overhead * p for p in threads]
 
-def plot(threads, times, mode):
-    times = np.array(times)
+def plot_all(threads, times):
+    threads = np.array(threads)
+    times   = np.array(times)
     speedup = times[0] / times
-    efficiency = speedup / np.array(threads) * 100
+    ideal   = threads.astype(float)
+    efficiency = speedup / threads * 100
 
-    fig, axes = plt.subplots(1, 3, figsize=(16, 5))
-    fig.suptitle(f"Анализ масштабируемости OpenMP-программы ({mode})",
-                 fontsize=14, fontweight="bold")
+    fig, ax = plt.subplots(1, 3, figsize=(17, 5))
+    fig.suptitle("Анализ масштабируемости OpenMP (8 потоков)",
+                 fontsize=15, fontweight="bold")
 
-    axes[0].plot(threads, times, "o-", color="crimson", linewidth=2)
-    axes[0].set_xlabel("Число потоков")
-    axes[0].set_ylabel("Время выполнения, с")
-    axes[0].set_title("Время выполнения T(p)")
-    axes[0].grid(True, linestyle="--", alpha=0.6)
-    axes[0].set_xticks(threads)
+    # --- Время ---
+    ax[0].plot(threads, times, "o-", color="crimson", linewidth=2,
+               markersize=8, label="Фактическое время")
+    ax[0].plot(threads, times[0] / ideal, "k--", alpha=0.6,
+               label="Идеальное (T(1)/p)")
+    ax[0].set_xlabel("Число потоков p")
+    ax[0].set_ylabel("Время T(p), с")
+    ax[0].set_title("Время выполнения")
+    ax[0].grid(True, linestyle=":", alpha=0.7)
+    ax[0].set_xticks(threads)
+    ax[0].legend()
 
-    axes[1].plot(threads, speedup, "s-", color="royalblue",
-                 linewidth=2, label="Фактическое")
-    axes[1].plot(threads, threads, "k--", alpha=0.5, label="Идеальное (линейное)")
-    axes[1].set_xlabel("Число потоков")
-    axes[1].set_ylabel("Ускорение S(p)")
-    axes[1].set_title("Ускорение S(p) = T(1)/T(p)")
-    axes[1].grid(True, linestyle="--", alpha=0.6)
-    axes[1].legend()
-    axes[1].set_xticks(threads)
+    # --- Ускорение ---
+    ax[1].plot(threads, speedup, "s-", color="royalblue", linewidth=2,
+               markersize=8, label="Фактическое ускорение")
+    ax[1].plot(threads, ideal, "k--", alpha=0.6, label="Идеальное (линейное)")
+    ax[1].set_xlabel("Число потоков p")
+    ax[1].set_ylabel("Ускорение S(p) = T(1)/T(p)")
+    ax[1].set_title("Ускорение")
+    ax[1].grid(True, linestyle=":", alpha=0.7)
+    ax[1].set_xticks(threads)
+    ax[1].legend()
 
-    axes[2].plot(threads, efficiency, "^-", color="seagreen", linewidth=2)
-    axes[2].axhline(100, color="k", linestyle="--", alpha=0.5)
-    axes[2].set_xlabel("Число потоков")
-    axes[2].set_ylabel("Эффективность, %")
-    axes[2].set_title("Эффективность E(p) = S(p)/p · 100%")
-    axes[2].grid(True, linestyle="--", alpha=0.6)
-    axes[2].set_xticks(threads)
+    # --- Эффективность ---
+    ax[2].plot(threads, efficiency, "^-", color="seagreen", linewidth=2,
+               markersize=8, label="Эффективность")
+    ax[2].axhline(100, color="k", linestyle="--", alpha=0.5, label="Идеал 100%")
+    ax[2].set_xlabel("Число потоков p")
+    ax[2].set_ylabel("Эффективность E(p), %")
+    ax[2].set_title("Эффективность")
+    ax[2].set_ylim(0, 110)
+    ax[2].grid(True, linestyle=":", alpha=0.7)
+    ax[2].set_xticks(threads)
+    ax[2].legend()
 
     plt.tight_layout()
     plt.savefig("speedup.png", dpi=150)
     plt.show()
 
 if __name__ == "__main__":
-    threads_list = [2, 4, 16, 32, 64]
-
     if compile_cpp():
-        print("Компиляция успешна. Выполняется реальный замер...\n")
-        times = measure_real(threads_list)
-        plot(threads_list, times, mode="реальные замеры")
+        print("Компиляция OK. Запуск реального замера...\n")
+        threads, times = run_and_parse()
+        print(f"{'p':>3} {'Time, s':>12} {'Speedup':>12} {'Efficiency, %':>15}")
+        print("-" * 46)
+        t1 = times[0]
+        for p, t in zip(threads, times):
+            s = t1 / t
+            e = s / p * 100
+            print(f"{p:>3} {t:>12.4f} {s:>12.4f} {e:>15.2f}")
+        plot_all(threads, times)
     else:
-        print("Компилятор g++ с OpenMP не найден.")
-        print("Строится демонстрационная модель масштабируемости.\n")
-        times = measure_model(threads_list)
-        for t, tm in zip(threads_list, times):
-            print(f"Потоков: {t:3d} -> время (модель): {tm:.4f} с")
-        plot(threads_list, times, mode="демонстрационная модель")
+        print("g++ не найден.\n")
